@@ -1,0 +1,232 @@
+name: Production Deployment
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to deploy'
+        required: true
+        type: string
+      skip_canary:
+        description: 'Skip canary deployment'
+        required: false
+        type: boolean
+        default: false
+      emergency_rollback:
+        description: 'Emergency rollback to specific version'
+        required: false
+        type: string
+
+env:
+  ENVIRONMENT: production
+  AWS_REGION: us-east-1
+  KUSTOMIZE_PATH: infrastructure/kubernetes/overlays/production
+  CANARY_TRAFFIC_PERCENTAGE: 10
+  DEPLOYMENT_TIMEOUT: 30m
+
+permissions:
+  id-token: write
+  contents: read
+  deployments: write
+  environments: write
+  security-events: write
+
+jobs:
+  validate_release:
+    name: Validate Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Download CI artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: container_images
+          path: artifacts
+
+      - name: Verify security scan results
+        uses: actions/download-artifact@v3
+        with:
+          name: security_scan_results
+          path: security-reports
+
+      - name: Validate security reports
+        run: |
+          if grep -q "CRITICAL" security-reports/**/*.json; then
+            echo "Critical vulnerabilities found in security scan"
+            exit 1
+          fi
+
+      - name: Verify infrastructure configuration
+        run: |
+          terraform init -backend=false
+          terraform validate
+        working-directory: infrastructure/terraform/environments/production
+
+  deploy_infrastructure:
+    name: Deploy Infrastructure
+    needs: [validate_release]
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Initialize Terraform
+        run: |
+          terraform init -backend=true
+          terraform workspace select production
+        working-directory: infrastructure/terraform/environments/production
+
+      - name: Plan infrastructure changes
+        id: plan
+        run: |
+          terraform plan -out=tfplan
+        working-directory: infrastructure/terraform/environments/production
+
+      - name: Apply infrastructure changes
+        if: github.event_name == 'push' || github.event.inputs.emergency_rollback
+        run: |
+          terraform apply -auto-approve tfplan
+        working-directory: infrastructure/terraform/environments/production
+
+  deploy_canary:
+    name: Deploy Canary
+    needs: [deploy_infrastructure]
+    runs-on: ubuntu-latest
+    environment: production
+    if: ${{ !inputs.skip_canary && !inputs.emergency_rollback }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig --name ai-driven-intake-prod --region ${{ env.AWS_REGION }}
+
+      - name: Deploy canary
+        run: |
+          kubectl apply -k ${{ env.KUSTOMIZE_PATH }}/canary
+          kubectl -n ai-intake-platform set image deployment/backend-canary backend=${{ env.ECR_REGISTRY }}/backend:${{ github.sha }}
+          kubectl -n ai-intake-platform set image deployment/web-canary web=${{ env.ECR_REGISTRY }}/web:${{ github.sha }}
+
+      - name: Configure traffic split
+        run: |
+          kubectl apply -f - <<EOF
+          apiVersion: networking.istio.io/v1alpha3
+          kind: VirtualService
+          metadata:
+            name: ai-intake-platform
+            namespace: ai-intake-platform
+          spec:
+            hosts:
+            - "*"
+            http:
+            - route:
+              - destination:
+                  host: backend
+                  subset: stable
+                weight: 90
+              - destination:
+                  host: backend
+                  subset: canary
+                weight: ${{ env.CANARY_TRAFFIC_PERCENTAGE }}
+          EOF
+
+      - name: Monitor canary health
+        uses: datadog/action-datadog-metrics@v1
+        with:
+          api-key: ${{ secrets.DATADOG_API_KEY }}
+          metrics: |
+            - name: ai.intake.canary.error_rate
+              threshold: 1.0
+              window: 5m
+            - name: ai.intake.canary.latency_p95
+              threshold: 500
+              window: 5m
+
+  promote_to_production:
+    name: Promote to Production
+    needs: [deploy_canary]
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig --name ai-driven-intake-prod --region ${{ env.AWS_REGION }}
+
+      - name: Gradually increase traffic
+        run: |
+          for weight in 25 50 75 100; do
+            kubectl apply -f - <<EOF
+            apiVersion: networking.istio.io/v1alpha3
+            kind: VirtualService
+            metadata:
+              name: ai-intake-platform
+              namespace: ai-intake-platform
+            spec:
+              hosts:
+              - "*"
+              http:
+              - route:
+                - destination:
+                    host: backend
+                    subset: canary
+                  weight: $weight
+                - destination:
+                    host: backend
+                    subset: stable
+                  weight: $((100-weight))
+            EOF
+            sleep 300
+          done
+
+      - name: Update production deployment
+        run: |
+          kubectl apply -k ${{ env.KUSTOMIZE_PATH }}
+          kubectl -n ai-intake-platform set image deployment/backend backend=${{ env.ECR_REGISTRY }}/backend:${{ github.sha }}
+          kubectl -n ai-intake-platform set image deployment/web web=${{ env.ECR_REGISTRY }}/web:${{ github.sha }}
+
+  rollback:
+    name: Rollback Deployment
+    needs: [deploy_canary, promote_to_production]
+    runs-on: ubuntu-latest
+    if: failure()
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig --name ai-driven-intake-prod --region ${{ env.AWS_REGION }}
+
+      - name: Rollback deployments
+        run: |
+          kubectl rollout undo deployment/backend -n ai-intake-platform
+          kubectl rollout undo deployment/web -n ai-intake-platform
+          kubectl delete -f ${{ env.KUSTOMIZE_PATH }}/canary
+
+      - name: Notify incident response
+        if: failure()
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+            --data '{"text":"🚨 Production deployment failed and rolled back. Immediate attention required."}' \
+            ${{ secrets.SLACK_WEBHOOK_URL }}
