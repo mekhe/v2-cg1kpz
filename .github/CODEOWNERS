@@ -1,0 +1,59 @@
+* @dollarfunding/platform-leads
+
+# Backend service implementations with mandatory security review
+/src/backend/ @dollarfunding/backend-team @dollarfunding/security-team
+
+# Web application and UI components
+/src/web/ @dollarfunding/frontend-team
+
+# OCR and machine learning components with security validation
+/src/backend/ocr/ @dollarfunding/ml-team @dollarfunding/security-team
+
+# Email processing with security review requirements
+/src/backend/email/ @dollarfunding/integration-team @dollarfunding/security-team
+
+# Infrastructure configurations with security validation
+/infrastructure/ @dollarfunding/devops-team @dollarfunding/security-team
+
+# Terraform infrastructure code with security review
+*.tf @dollarfunding/devops-team @dollarfunding/security-team
+
+# Security-critical implementations requiring security team approval
+/src/backend/core/security/** @dollarfunding/security-team
+
+# CI/CD and configuration files
+*.yml @dollarfunding/devops-team
+.github/workflows/ @dollarfunding/devops-team
+
+# Test implementations with security validation requirements
+/src/backend/tests/ @dollarfunding/qa-team @dollarfunding/security-team
+
+# Documentation files
+*.md @dollarfunding/docs-team
+/docs/ @dollarfunding/docs-team
+
+# Frontend dependencies with security review
+package.json @dollarfunding/frontend-team @dollarfunding/security-team
+package-lock.json @dollarfunding/frontend-team @dollarfunding/security-team
+
+# Backend dependencies with security review
+requirements.txt @dollarfunding/backend-team @dollarfunding/security-team
+pyproject.toml @dollarfunding/backend-team @dollarfunding/security-team
+poetry.lock @dollarfunding/backend-team @dollarfunding/security-team
+
+# Docker configurations with security validation
+Dockerfile @dollarfunding/devops-team @dollarfunding/security-team
+.dockerignore @dollarfunding/devops-team @dollarfunding/security-team
+
+# Database migrations requiring review
+/src/backend/migrations/ @dollarfunding/backend-team @dollarfunding/security-team
+
+# API specifications with security validation
+/src/backend/api/ @dollarfunding/backend-team @dollarfunding/security-team
+
+# Configuration files with security review
+*.env @dollarfunding/devops-team @dollarfunding/security-team
+*.config.js @dollarfunding/devops-team @dollarfunding/security-team
+
+# GitHub specific configurations
+.github/ @dollarfunding/devops-team
