@@ -1,0 +1,140 @@
+version: '3.8'
+
+services:
+  # Frontend React Application
+  web:
+    build:
+      context: ./src/web
+      dockerfile: Dockerfile
+      target: development
+      args:
+        NODE_VERSION: "18.17.1"
+        NGINX_VERSION: "1.25.1"
+    ports:
+      - "3000:3000"
+    expose:
+      - "3000"
+    volumes:
+      - ./src/web:/app:ro
+      - /app/node_modules
+      - ./logs/web:/var/log/nginx
+    environment:
+      - NODE_ENV=development
+      - VITE_APP_ENV=development
+      - VITE_API_BASE_URL=http://localhost:8000
+      - VITE_API_VERSION=v1
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    restart: unless-stopped
+    networks:
+      - ai_intake_network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Backend FastAPI Application
+  api:
+    extends:
+      file: ./src/backend/docker-compose.yml
+      service: api
+    networks:
+      - ai_intake_network
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_started
+      queue:
+        condition: service_healthy
+
+  # Celery Worker Service
+  worker:
+    extends:
+      file: ./src/backend/docker-compose.yml
+      service: worker
+    networks:
+      - ai_intake_network
+    depends_on:
+      - db
+      - cache
+      - queue
+
+  # PostgreSQL Database Service
+  db:
+    extends:
+      file: ./src/backend/docker-compose.yml
+      service: db
+    networks:
+      - ai_intake_network
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  # Redis Cache Service
+  cache:
+    extends:
+      file: ./src/backend/docker-compose.yml
+      service: cache
+    networks:
+      - ai_intake_network
+    volumes:
+      - redisdata:/data
+
+  # RabbitMQ Message Queue Service
+  queue:
+    extends:
+      file: ./src/backend/docker-compose.yml
+      service: queue
+    networks:
+      - ai_intake_network
+    volumes:
+      - rabbitmqdata:/var/lib/rabbitmq
+
+volumes:
+  pgdata:
+    driver: local
+    driver_opts:
+      type: none
+      device: ./data/postgres
+      o: bind
+  redisdata:
+    driver: local
+    driver_opts:
+      type: none
+      device: ./data/redis
+      o: bind
+  rabbitmqdata:
+    driver: local
+    driver_opts:
+      type: none
+      device: ./data/rabbitmq
+      o: bind
+
+networks:
+  ai_intake_network:
+    driver: bridge
+    internal: false
+    enable_ipv6: false
+    driver_opts:
+      encrypted: "true"
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/16
+          gateway: 172.28.0.1
