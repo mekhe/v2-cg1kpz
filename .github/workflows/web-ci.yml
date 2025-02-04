@@ -1,0 +1,182 @@
+name: Web Frontend CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'src/web/**'
+      - '.github/workflows/web-ci.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'src/web/**'
+      - '.github/workflows/web-ci.yml'
+
+env:
+  NODE_VERSION: '18.x'
+  DOCKER_REGISTRY: ${{ secrets.DOCKER_REGISTRY }}
+  NODE_ENV: 'ci'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: src/web/package-lock.json
+
+      - name: Install dependencies
+        working-directory: src/web
+        run: |
+          npm ci
+          npm audit
+
+      - name: Run ESLint
+        working-directory: src/web
+        run: npm run lint
+        
+      - name: Check formatting
+        working-directory: src/web
+        run: npx prettier --check "src/**/*.{ts,tsx,css,json}"
+
+      - name: TypeScript compilation check
+        working-directory: src/web
+        run: npm run typecheck
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: src/web/package-lock.json
+
+      - name: Install dependencies
+        working-directory: src/web
+        run: npm ci
+
+      - name: Run tests with coverage
+        working-directory: src/web
+        run: npm run test:coverage
+
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-coverage
+          path: src/web/coverage/
+          retention-days: 14
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Run Snyk security scan
+        uses: snyk/actions/node@v1
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high
+          command: monitor
+
+      - name: Generate Snyk report
+        if: always()
+        run: |
+          mkdir -p snyk-report
+          snyk test --json > snyk-report/security-report.json || true
+
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-report
+          path: snyk-report/
+          retention-days: 30
+
+  build:
+    name: Build Container
+    needs: [lint, test, security]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+        with:
+          buildkitd-flags: --debug
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build and push image
+        uses: docker/build-push-action@v4
+        with:
+          context: src/web
+          file: src/web/Dockerfile
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: |
+            ${{ env.DOCKER_REGISTRY }}/web:${{ github.sha }}
+            ${{ github.ref == 'refs/heads/main' && format('{0}/web:latest', env.DOCKER_REGISTRY) || '' }}
+          build-args: |
+            VERSION=${{ github.sha }}
+            BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+            GIT_COMMIT=${{ github.sha }}
+            API_URL=${{ secrets.API_URL }}
+            WS_URL=${{ secrets.WS_URL }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+          provenance: false
+          sbom: true
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.DOCKER_REGISTRY }}/web:${{ github.sha }}
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
