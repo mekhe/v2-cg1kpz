@@ -1,0 +1,106 @@
+AI-DRIVEN APPLICATION INTAKE PLATFORM LICENSE AGREEMENT
+Version 1.0.0
+Effective Date: 2024-01-20
+
+Copyright © 2024 Dollar Funding. All rights reserved.
+
+1. DEFINITIONS
+
+"Software" means the AI-Driven Application Intake Platform software, including all source code, documentation, APIs, and related materials.
+
+"AI Components" means machine learning models, OCR engines, and data extraction algorithms included in the Software.
+
+"Financial Data" means any merchant cash advance applications, bank statements, or related financial information processed by the Software.
+
+"PII" means personally identifiable information including but not limited to names, addresses, social security numbers, and banking information.
+
+"Third-Party Services" means external services and components integrated with the Software including AWS services, authentication providers, and monitoring tools.
+
+2. GRANT OF LICENSE
+
+Subject to the terms and conditions of this Agreement, Dollar Funding grants you a non-exclusive, non-transferable license to:
+
+a) Install and use the Software for processing merchant cash advance applications
+b) Modify the Software solely for your organization's internal use
+c) Create and maintain backup copies of the Software
+
+You may not:
+- Sublicense, sell, or distribute the Software
+- Remove or alter any copyright notices or licensing information
+- Use the Software for any purpose other than merchant cash advance application processing
+- Reverse engineer or decompile the AI Components except as permitted by law
+
+3. DATA PRIVACY AND SECURITY
+
+Licensee shall:
+
+a) Implement and maintain security controls meeting or exceeding:
+   - AES-256 encryption for data at rest
+   - TLS 1.3 for data in transit
+   - Field-level encryption for PII
+   - HSM-backed key management
+
+b) Handle all PII and Financial Data in accordance with:
+   - Payment Card Industry Data Security Standard (PCI DSS)
+   - Gramm-Leach-Bliley Act (GLBA)
+   - State and federal data privacy regulations
+
+c) Maintain audit logs of all data access and processing activities
+
+4. COMPLIANCE REQUIREMENTS
+
+Licensee must maintain compliance with:
+
+a) OWASP Security Standards
+b) PCI DSS Requirements
+c) SOC 2 Type II Controls
+d) ISO 27001 Information Security Standards
+
+Annual compliance audits and quarterly security assessments are required.
+
+5. THIRD-PARTY INTEGRATION
+
+Integration with Third-Party Services must:
+
+a) Maintain end-to-end encryption
+b) Implement appropriate authentication mechanisms
+c) Follow security best practices for API integration
+d) Comply with service providers' terms of use
+
+6. WARRANTY DISCLAIMER
+
+THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. DOLLAR FUNDING SPECIFICALLY DISCLAIMS ALL IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT.
+
+7. LIABILITY LIMITATION
+
+IN NO EVENT SHALL DOLLAR FUNDING BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES ARISING OUT OF OR IN CONNECTION WITH THE SOFTWARE.
+
+Total liability shall not exceed the amount paid for the Software license in the twelve months preceding the claim.
+
+8. TERM AND TERMINATION
+
+This Agreement commences on the Effective Date and continues until terminated.
+
+Dollar Funding may terminate this Agreement immediately if:
+a) Licensee breaches any material term
+b) Licensee fails to maintain required compliance standards
+c) Licensee becomes insolvent or subject to bankruptcy proceedings
+
+Upon termination:
+a) All rights granted under this license cease immediately
+b) Licensee must destroy all copies of the Software
+c) Licensee must certify compliance with data destruction requirements
+
+9. GOVERNING LAW
+
+This Agreement shall be governed by the laws of the State of Delaware, United States.
+
+Any disputes shall be resolved exclusively in the state or federal courts located in Delaware.
+
+10. CONTACT INFORMATION
+
+Legal Department: legal@dollarfunding.com
+Compliance Department: compliance@dollarfunding.com
+
+Last Reviewed: 2024-01-20
+Next Review: 2024-07-20
