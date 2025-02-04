@@ -1,0 +1,166 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'src/backend/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'src/backend/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  POETRY_VERSION: "1.5.0"
+  MIN_COVERAGE: "95"
+  MAX_TIMEOUT: "30"
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ env.MAX_TIMEOUT }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python - --version ${{ env.POETRY_VERSION }}
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Cache Poetry dependencies
+        uses: actions/cache@v3
+        with:
+          path: .venv
+          key: ${{ runner.os }}-poetry-${{ hashFiles('**/poetry.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-poetry-
+
+      - name: Install dependencies
+        run: |
+          poetry config virtualenvs.in-project true
+          poetry install
+
+      - name: Run tests with coverage
+        run: |
+          poetry run pytest tests/ \
+            --cov=src \
+            --cov-report=xml \
+            --cov-report=html \
+            --cov-fail-under=${{ env.MIN_COVERAGE }} \
+            --junitxml=test-results/junit.xml
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          fail_ci_if_error: true
+
+      - name: Store test results
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-results
+          path: |
+            test-results/
+            coverage/
+          retention-days: 14
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ env.MAX_TIMEOUT }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Run Snyk security scan
+        uses: snyk/actions/python@v1
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          command: test
+          args: --severity-threshold=high
+
+      - name: Run Bandit static analysis
+        run: |
+          pip install bandit
+          bandit -r src/ -f json -o security-reports/bandit.json
+          bandit -r src/ -f html -o security-reports/bandit.html
+
+      - name: Check dependency licenses
+        run: |
+          pip install safety
+          safety check -r requirements.txt --json > security-reports/safety.json
+
+      - name: Store security reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-reports
+          path: security-reports/
+          retention-days: 30
+
+  build:
+    name: Build and Push Container
+    needs: [test, security]
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ env.MAX_TIMEOUT }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build and scan image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: src/backend/Dockerfile
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: |
+            ${{ secrets.DOCKER_REGISTRY }}/backend:${{ github.sha }}
+            ${{ secrets.DOCKER_REGISTRY }}/backend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            PYTHON_VERSION=${{ env.PYTHON_VERSION }}
+            POETRY_VERSION=${{ env.POETRY_VERSION }}
+          platforms: linux/amd64
+          provenance: false
+          sbom: true
+          scan: true
