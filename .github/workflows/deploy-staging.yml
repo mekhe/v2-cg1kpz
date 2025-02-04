@@ -1,0 +1,200 @@
+name: Deploy to Staging
+
+on:
+  push:
+    branches:
+      - develop
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to deploy'
+        required: true
+        type: string
+      force_deploy:
+        description: 'Force deployment without verification'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  ENVIRONMENT: staging
+  AWS_REGION: us-east-1
+  KUSTOMIZE_PATH: infrastructure/kubernetes/overlays/staging
+  TERRAFORM_PATH: infrastructure/terraform/environments/staging
+  DEPLOYMENT_TIMEOUT: '600'
+  HEALTH_CHECK_RETRIES: '5'
+  ROLLBACK_THRESHOLD: '90'
+
+permissions:
+  id-token: write
+  contents: read
+  deployments: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  deploy_infrastructure:
+    name: Deploy Infrastructure
+    runs-on: ubuntu-latest
+    environment: staging
+    outputs:
+      cluster_endpoint: ${{ steps.terraform.outputs.eks_cluster_endpoint }}
+      vpc_id: ${{ steps.terraform.outputs.vpc_id }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: "1.5.0"
+
+      - name: Initialize Terraform
+        working-directory: ${{ env.TERRAFORM_PATH }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TERRAFORM_STATE_BUCKET }}" \
+            -backend-config="dynamodb_table=${{ secrets.TERRAFORM_STATE_LOCK_TABLE }}" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+
+      - name: Validate Terraform
+        working-directory: ${{ env.TERRAFORM_PATH }}
+        run: terraform validate
+
+      - name: Plan Terraform changes
+        working-directory: ${{ env.TERRAFORM_PATH }}
+        run: |
+          terraform plan \
+            -var="environment=staging" \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -var="vpc_cidr=10.0.0.0/16" \
+            -out=tfplan
+
+      - name: Apply Terraform changes
+        id: terraform
+        working-directory: ${{ env.TERRAFORM_PATH }}
+        run: terraform apply -auto-approve tfplan
+
+  deploy_applications:
+    name: Deploy Applications
+    needs: deploy_infrastructure
+    runs-on: ubuntu-latest
+    environment: staging
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ai-driven-intake-staging
+
+      - name: Install Kustomize
+        run: |
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo mv kustomize /usr/local/bin/
+
+      - name: Update image tags
+        working-directory: ${{ env.KUSTOMIZE_PATH }}
+        run: |
+          VERSION=${{ github.event.inputs.version || github.sha }}
+          kustomize edit set image \
+            backend=${{ secrets.ECR_REGISTRY }}/backend:${VERSION} \
+            web=${{ secrets.ECR_REGISTRY }}/web:${VERSION}
+
+      - name: Setup Blue environment
+        run: |
+          kubectl create namespace ai-intake-platform-blue --dry-run=client -o yaml | kubectl apply -f -
+          kustomize build ${{ env.KUSTOMIZE_PATH }} | \
+            sed 's/namespace: ai-intake-platform/namespace: ai-intake-platform-blue/' | \
+            kubectl apply -f -
+
+      - name: Verify Blue deployment
+        run: |
+          kubectl -n ai-intake-platform-blue wait --for=condition=available \
+            --timeout=300s deployment -l app.kubernetes.io/part-of=ai-intake-platform
+          
+          for i in $(seq 1 ${{ env.HEALTH_CHECK_RETRIES }}); do
+            if kubectl -n ai-intake-platform-blue exec deploy/backend -- curl -s http://localhost:8000/health | grep -q "healthy"; then
+              echo "Health check passed"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Health check failed"
+          exit 1
+
+      - name: Switch traffic
+        run: |
+          kubectl patch service ai-intake-platform -n ai-intake-platform \
+            -p '{"spec":{"selector":{"environment":"blue"}}}'
+
+      - name: Monitor deployment health
+        run: |
+          ERROR_RATE=$(kubectl -n ai-intake-platform-blue get metrics backend-error-rate -o jsonpath='{.value}')
+          if [ "$ERROR_RATE" -gt "${{ env.ROLLBACK_THRESHOLD }}" ]; then
+            echo "Error rate too high: $ERROR_RATE%. Rolling back..."
+            kubectl patch service ai-intake-platform -n ai-intake-platform \
+              -p '{"spec":{"selector":{"environment":"green"}}}'
+            exit 1
+          fi
+
+      - name: Cleanup old deployment
+        if: success()
+        run: |
+          kubectl delete namespace ai-intake-platform-green --ignore-not-found
+
+      - name: Notify deployment status
+        if: always()
+        run: |
+          curl -X POST -H 'Content-type: application/json' \
+            --data '{"text":"Staging deployment ${{ job.status }}: ${{ github.sha }}"}' \
+            ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  verify_deployment:
+    name: Verify Deployment
+    needs: deploy_applications
+    runs-on: ubuntu-latest
+    environment: staging
+
+    steps:
+      - name: Run integration tests
+        run: |
+          curl --retry 5 --retry-delay 10 -f \
+            https://staging-api.dollarfunding.com/health || exit 1
+
+      - name: Verify metrics
+        run: |
+          RESPONSE_TIME=$(curl -s https://staging-api.dollarfunding.com/metrics | \
+            grep http_request_duration_seconds | \
+            awk '{print $2}')
+          
+          if (( $(echo "$RESPONSE_TIME > 0.5" | bc -l) )); then
+            echo "Response time too high: ${RESPONSE_TIME}s"
+            exit 1
+          fi
+
+      - name: Update deployment status
+        if: success()
+        run: |
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            /repos/${{ github.repository }}/deployments/${{ github.event.deployment.id }}/statuses \
+            -f state='success' \
+            -f environment_url='https://staging.dollarfunding.com'
